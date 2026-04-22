@@ -1,0 +1,7 @@
+streamlit
+trimesh
+numpy
+joblib
+streamlit-stl
+numpy-stl
+scikit-learn
