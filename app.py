@@ -46,7 +46,16 @@ except:
 
 # ---------------- HEADER ---------------- #
 st.title("⚙️ CAD2CAM AI")
-st.caption("AI-Assisted CAD-to-CAM Machining Planner")
+
+st.markdown(
+    """
+    <div style='font-size:16px; color:#9CA3AF; margin-top:-10px; margin-bottom:10px;'>
+    An AI-powered system that converts CAD models into machining insights by analyzing geometry,
+    predicting manufacturing operations, and generating material-aware CAM plans with basic CNC code output.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 st.divider()
 
