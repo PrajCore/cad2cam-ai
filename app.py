@@ -33,7 +33,6 @@ html, body, [class*="css"] {
     border-radius: 8px;
     font-family: monospace;
 }
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,8 +50,28 @@ st.caption("AI-Assisted CAD-to-CAM Machining Planner")
 
 st.divider()
 
-# ---------------- SIDEBAR ---------------- #
-uploaded_file = st.sidebar.file_uploader("Upload STL file", type=["stl"])
+# ---------------- INPUT ---------------- #
+uploaded_file = st.file_uploader("Upload STL file", type=["stl"])
+
+material = st.selectbox(
+    "Select Material",
+    ["Aluminium", "Steel", "Cast Iron", "Plastic"]
+)
+
+finish = st.selectbox(
+    "Surface Finish Requirement",
+    ["Rough", "Medium", "Fine"]
+)
+
+# ---------------- FIXED HOLE DETECTION ---------------- #
+def detect_hole(mesh):
+    bbox_vol = np.prod(mesh.bounding_box.extents)
+    mesh_vol = mesh.volume if mesh.volume > 0 else 1e-6
+
+    void_ratio = 1 - (mesh_vol / bbox_vol)
+    curvature_hint = np.std(mesh.face_normals)
+
+    return (void_ratio > 0.2) or (curvature_hint > 0.3)
 
 # ---------------- FEATURE EXTRACTION ---------------- #
 def extract_features(file):
@@ -68,9 +87,9 @@ def extract_features(file):
     flatness = np.mean(np.abs(mesh_obj.face_normals[:, 2]))
     curvature = np.std(mesh_obj.face_normals)
 
-    has_hole = mesh_obj.euler_number < 0
+    # ✅ FIXED LINE HERE
+    has_hole = detect_hole(mesh_obj)
 
-    # ML features
     complexity = surface_area / (volume + 1e-6)
     hole_indicator = 1 if has_hole else 0
     curvature_proxy = curvature * flatness
@@ -103,8 +122,9 @@ def ml_predict(features):
 
     return time_model.predict(X)[0], op_model.predict(X)[0]
 
-# ---------------- PROCESS ---------------- #
-def generate_process_plan(features, ml_op):
+# ---------------- PROCESS PLAN ---------------- #
+def generate_process_plan(features, ml_op, finish):
+
     steps = []
 
     if features["Is Cylindrical"]:
@@ -121,9 +141,13 @@ def generate_process_plan(features, ml_op):
     if ml_op and "thread" in str(ml_op).lower():
         steps.append("Threading")
 
+    if finish == "Fine":
+        steps.append("Precision Finishing")
+
     steps.append("Finishing")
     return steps
 
+# ---------------- TOOL SELECTION ---------------- #
 def select_tools(steps):
     tool_map = {
         "Facing": "Face Mill",
@@ -131,6 +155,7 @@ def select_tools(steps):
         "Drilling": "Drill",
         "Rough Machining": "End Mill",
         "Finishing": "Ball Nose",
+        "Precision Finishing": "Fine Ball Nose",
         "Threading": "Thread Tool"
     }
 
@@ -142,25 +167,33 @@ def select_tools(steps):
 
     return list(set(tools))
 
-def generate_gcode(steps):
-    gcode = ["G21", "G90", "G0 X0 Y0 Z5"]
+# ---------------- CNC ---------------- #
+def generate_gcode(steps, material, finish):
+
+    feed = 300 if material == "Aluminium" else 200
+    if material == "Steel":
+        feed = 180
+
+    depth = 1.0 if finish == "Rough" else 0.5 if finish == "Medium" else 0.2
+
+    gcode = ["G21", "G90", "G0 X0 Y0 Z5", f"G1 F{feed}"]
 
     for s in steps:
         if "Facing" in s:
-            gcode += ["G1 Z-1 F100", "G1 X50"]
+            gcode.append(f"G1 Z-{depth} X50")
         elif "Turning" in s:
-            gcode.append("G1 X0 Z-20 F120")
+            gcode.append("G1 X0 Z-20")
         elif "Drilling" in s:
-            gcode.append("G81 X10 Y10 Z-5 R2")
-        elif "Threading" in s:
-            gcode.append("G76 X10 Z-20 F1.5")
-        elif "Rough" in s:
-            gcode.append("G1 X50 Y50 Z-2")
+            gcode.append("G81 X10 Y10 Z-5")
         elif "Finishing" in s:
-            gcode.append("G1 X50 Y50 Z-1")
+            gcode.append(f"G1 Z-{depth/2} X50")
 
     gcode.append("M30")
     return gcode
+
+# ---------------- 3D VIEW ---------------- #
+def show_3d(file):
+    stl_from_file(file)
 
 # ---------------- MAIN ---------------- #
 if uploaded_file:
@@ -174,7 +207,7 @@ if uploaded_file:
         tmp.write(uploaded_file.getvalue())
         path = tmp.name
 
-    stl_from_file(path)
+    show_3d(path)
     os.remove(path)
 
     # PROCESS
@@ -183,7 +216,7 @@ if uploaded_file:
 
     st.divider()
 
-    # METRICS
+    # GEOMETRY
     st.subheader("Geometry")
 
     col1, col2, col3 = st.columns(3)
@@ -194,7 +227,7 @@ if uploaded_file:
     col4, col5, col6 = st.columns(3)
     col4.metric("Flatness", round(features["Flatness"], 4))
     col5.metric("Curvature", round(features["Curvature"], 4))
-    col6.metric("Cylindrical", "Yes" if features["Is Cylindrical"] else "No")
+    col6.metric("Hole", "Yes" if features["Has Hole"] else "No")
 
     st.divider()
 
@@ -203,18 +236,16 @@ if uploaded_file:
 
     time_pred, op_pred = ml_predict(features)
 
-    if time_pred is not None:
+    if time_pred:
         st.write(f"Estimated Time: **{round(time_pred,2)} min**")
-        st.write(f"Suggested Operation: **{op_pred}**")
-    else:
-        st.info("ML model not loaded")
+        st.write(f"Operation: **{op_pred}**")
 
     st.divider()
 
-    # PLAN
+    # PROCESS PLAN
     st.subheader("Process Plan")
 
-    plan = generate_process_plan(features, op_pred)
+    plan = generate_process_plan(features, op_pred, finish)
 
     st.markdown(f"<div class='highlight'>{' → '.join(plan)}</div>", unsafe_allow_html=True)
 
@@ -234,11 +265,12 @@ if uploaded_file:
     # CNC
     st.subheader("CNC Code")
 
-    gcode = generate_gcode(plan)
+    gcode = generate_gcode(plan, material, finish)
     gcode_text = "\n".join(gcode)
 
-    st.code(gcode_text)
-    st.download_button("Download CNC", gcode_text, "gcode.txt")
+    st.code(gcode_text, language="gcode")
+
+    st.download_button("Download CNC Code", gcode_text, "gcode.txt")
 
     st.divider()
 
@@ -248,24 +280,27 @@ if uploaded_file:
     report = f"""
 CAD2CAM AI REPORT
 
-Geometry:
-Volume: {round(features['Volume'],2)}
-Surface Area: {round(features['Surface Area'],2)}
-Complexity: {round(features['Complexity'],2)}
+Material: {material}
+Finish: {finish}
 
-AI Prediction:
-Estimated Time: {round(time_pred,2) if time_pred else "N/A"} min
-Operation: {op_pred if op_pred else "N/A"}
+Geometry:
+Volume: {features['Volume']}
+Surface Area: {features['Surface Area']}
+Complexity: {features['Complexity']}
 
 Process Plan:
 {chr(10).join(plan)}
 
-Tools Used:
+Tools:
 {', '.join(tools)}
+
+GCODE:
+{gcode_text}
 """
 
-    st.text_area("Report Preview", report, height=200)
-    st.download_button("Download Report", report, "machining_report.txt")
+    st.text_area("Report Preview", report, height=250)
+
+    st.download_button("Download Report", report, "cad2cam_report.txt")
 
 else:
     st.info("Upload an STL file to begin")
