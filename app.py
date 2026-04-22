@@ -46,6 +46,7 @@ except:
 
 # ---------------- HEADER ---------------- #
 st.title("⚙️ CAD2CAM AI")
+st.caption("AI-Assisted CAD-to-CAM Machining Planner")
 
 st.markdown(
     """
