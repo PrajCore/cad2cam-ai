@@ -9,24 +9,15 @@ import os
 # ---------------- PAGE CONFIG ---------------- #
 st.set_page_config(page_title="CAD2CAM AI", layout="wide")
 
-# ---------------- CLEAN DARK UI ---------------- #
+# ---------------- UI ---------------- #
 st.markdown("""
 <style>
 html, body, [class*="css"] {
     font-family: "Segoe UI", "Inter", sans-serif;
 }
-
 .main {
     background-color: #0E1117;
 }
-
-.section-title {
-    font-size: 20px;
-    font-weight: 600;
-    margin-top: 20px;
-    margin-bottom: 10px;
-}
-
 .highlight {
     background-color: #111827;
     padding: 12px;
@@ -48,15 +39,12 @@ except:
 st.title("⚙️ CAD2CAM AI")
 st.caption("AI-Assisted CAD-to-CAM Machining Planner")
 
-st.markdown(
-    """
-    <div style='font-size:16px; color:#9CA3AF; margin-top:-10px; margin-bottom:10px;'>
-    An AI-powered system that converts CAD models into machining insights by analyzing geometry,
-    predicting manufacturing operations, and generating material-aware CAM plans with basic CNC code output.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<div style='font-size:16px; color:#9CA3AF; margin-top:-10px; margin-bottom:10px;'>
+AI-powered system that converts CAD models into machining insights by analyzing geometry,
+predicting operations, and generating material-aware CAM plans with CNC output.
+</div>
+""", unsafe_allow_html=True)
 
 st.divider()
 
@@ -73,46 +61,43 @@ finish = st.selectbox(
     ["Rough", "Medium", "Fine"]
 )
 
-# ---------------- FIXED HOLE DETECTION ---------------- #
+# ---------------- HOLE DETECTION ---------------- #
 def detect_hole(mesh):
     bbox_vol = np.prod(mesh.bounding_box.extents)
     mesh_vol = mesh.volume if mesh.volume > 0 else 1e-6
-
     void_ratio = 1 - (mesh_vol / bbox_vol)
     curvature_hint = np.std(mesh.face_normals)
-
     return (void_ratio > 0.2) or (curvature_hint > 0.3)
 
 # ---------------- FEATURE EXTRACTION ---------------- #
 def extract_features(file):
-    mesh_obj = trimesh.load(file, file_type='stl', force='mesh')
-    mesh_obj.process()
+    mesh = trimesh.load(file, file_type='stl', force='mesh')
+    mesh.process()
 
-    volume = mesh_obj.volume or 0
-    surface_area = mesh_obj.area or 0
+    volume = mesh.volume or 0
+    area = mesh.area or 0
 
-    length, width, height = mesh_obj.bounding_box.extents
-    is_cylindrical = abs(length - width) < 0.1 * max(length, width)
+    length, width, height = mesh.bounding_box.extents
+    is_cyl = abs(length - width) < 0.1 * max(length, width)
 
-    flatness = np.mean(np.abs(mesh_obj.face_normals[:, 2]))
-    curvature = np.std(mesh_obj.face_normals)
+    flatness = np.mean(np.abs(mesh.face_normals[:, 2]))
+    curvature = np.std(mesh.face_normals)
 
-    # ✅ FIXED LINE HERE
-    has_hole = detect_hole(mesh_obj)
+    has_hole = detect_hole(mesh)
 
-    complexity = surface_area / (volume + 1e-6)
+    complexity = area / (volume + 1e-6)
     hole_indicator = 1 if has_hole else 0
     curvature_proxy = curvature * flatness
 
     return {
         "Volume": volume,
-        "Surface Area": surface_area,
+        "Surface Area": area,
         "Complexity": complexity,
         "Hole Indicator": hole_indicator,
         "Flatness": flatness,
         "Curvature Proxy": curvature_proxy,
         "Curvature": curvature,
-        "Is Cylindrical": is_cylindrical,
+        "Is Cylindrical": is_cyl,
         "Has Hole": has_hole
     }
 
@@ -133,7 +118,7 @@ def ml_predict(features):
     return time_model.predict(X)[0], op_model.predict(X)[0]
 
 # ---------------- PROCESS PLAN ---------------- #
-def generate_process_plan(features, ml_op, finish):
+def generate_plan(features, ml_op, finish):
 
     steps = []
 
@@ -171,9 +156,9 @@ def select_tools(steps):
 
     tools = []
     for s in steps:
-        for key in tool_map:
-            if key in s:
-                tools.append(tool_map[key])
+        for k in tool_map:
+            if k in s:
+                tools.append(tool_map[k])
 
     return list(set(tools))
 
@@ -201,9 +186,33 @@ def generate_gcode(steps, material, finish):
     gcode.append("M30")
     return gcode
 
-# ---------------- 3D VIEW ---------------- #
-def show_3d(file):
-    stl_from_file(file)
+# ---------------- MANUFACTURABILITY ---------------- #
+def manufacturability(features, material, finish, time_pred):
+
+    issues = []
+    cost = 1.0
+
+    if features["Complexity"] > 5:
+        issues.append("High complexity → More machining time")
+        cost += 0.3
+
+    if features["Has Hole"] and features["Curvature"] > 0.5:
+        issues.append("Complex hole geometry → Difficult machining")
+        cost += 0.2
+
+    if material == "Steel":
+        issues.append("Hard material → Increased tool wear")
+        cost += 0.3
+
+    if finish == "Fine":
+        issues.append("Fine finish → Requires precision machining")
+        cost += 0.25
+
+    if time_pred and time_pred > 30:
+        issues.append("Long machining time → Higher cost")
+        cost += 0.2
+
+    return issues, round(cost * 100, 2)
 
 # ---------------- MAIN ---------------- #
 if uploaded_file:
@@ -212,38 +221,35 @@ if uploaded_file:
 
     # 3D VIEW
     st.subheader("3D Model")
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".stl") as tmp:
         tmp.write(uploaded_file.getvalue())
         path = tmp.name
 
-    show_3d(path)
+    stl_from_file(path)
     os.remove(path)
 
     # PROCESS
-    with st.spinner("Analyzing model..."):
-        features = extract_features(uploaded_file)
+    features = extract_features(uploaded_file)
 
     st.divider()
 
-    # GEOMETRY
+    # GEOMETRY WITH UNITS
     st.subheader("Geometry")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Volume", round(features["Volume"], 2))
-    col2.metric("Surface Area", round(features["Surface Area"], 2))
-    col3.metric("Complexity", round(features["Complexity"], 2))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Volume (mm³)", round(features["Volume"], 2))
+    c2.metric("Surface Area (mm²)", round(features["Surface Area"], 2))
+    c3.metric("Complexity (SA/Vol)", round(features["Complexity"], 2))
 
-    col4, col5, col6 = st.columns(3)
-    col4.metric("Flatness", round(features["Flatness"], 4))
-    col5.metric("Curvature", round(features["Curvature"], 4))
-    col6.metric("Hole", "Yes" if features["Has Hole"] else "No")
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Flatness (norm)", round(features["Flatness"], 4))
+    c5.metric("Curvature (std)", round(features["Curvature"], 4))
+    c6.metric("Hole Detected", "Yes" if features["Has Hole"] else "No")
 
     st.divider()
 
     # ML
     st.subheader("AI Prediction")
-
     time_pred, op_pred = ml_predict(features)
 
     if time_pred:
@@ -252,10 +258,9 @@ if uploaded_file:
 
     st.divider()
 
-    # PROCESS PLAN
+    # PLAN
     st.subheader("Process Plan")
-
-    plan = generate_process_plan(features, op_pred, finish)
+    plan = generate_plan(features, op_pred, finish)
 
     st.markdown(f"<div class='highlight'>{' → '.join(plan)}</div>", unsafe_allow_html=True)
 
@@ -266,7 +271,6 @@ if uploaded_file:
 
     # TOOLS
     st.subheader("Tools")
-
     tools = select_tools(plan)
     st.write(", ".join(tools))
 
@@ -274,13 +278,33 @@ if uploaded_file:
 
     # CNC
     st.subheader("CNC Code")
-
     gcode = generate_gcode(plan, material, finish)
     gcode_text = "\n".join(gcode)
 
-    st.code(gcode_text, language="gcode")
+    st.code(gcode_text)
+    st.download_button("Download CNC", gcode_text, "gcode.txt")
 
-    st.download_button("Download CNC Code", gcode_text, "gcode.txt")
+    st.divider()
+
+    # MANUFACTURABILITY (NEW)
+    st.subheader("Manufacturability Analysis")
+
+    issues, cost_index = manufacturability(features, material, finish, time_pred)
+
+    if issues:
+        for i in issues:
+            st.warning(i)
+    else:
+        st.success("No major issues detected")
+
+    st.metric("Estimated Cost Index", cost_index)
+
+    if cost_index < 130:
+        st.success("Low Manufacturing Cost")
+    elif cost_index < 160:
+        st.warning("Moderate Manufacturing Cost")
+    else:
+        st.error("High Manufacturing Cost")
 
     st.divider()
 
@@ -293,10 +317,12 @@ CAD2CAM AI REPORT
 Material: {material}
 Finish: {finish}
 
-Geometry:
 Volume: {features['Volume']}
 Surface Area: {features['Surface Area']}
 Complexity: {features['Complexity']}
+
+Estimated Time: {time_pred}
+Operation: {op_pred}
 
 Process Plan:
 {chr(10).join(plan)}
@@ -304,13 +330,15 @@ Process Plan:
 Tools:
 {', '.join(tools)}
 
-GCODE:
-{gcode_text}
+Manufacturability Issues:
+{chr(10).join(issues)}
+
+Cost Index: {cost_index}
 """
 
     st.text_area("Report Preview", report, height=250)
-
-    st.download_button("Download Report", report, "cad2cam_report.txt")
+    st.download_button("Download Report", report, "report.txt")
 
 else:
     st.info("Upload an STL file to begin")
+
